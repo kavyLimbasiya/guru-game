@@ -11,6 +11,13 @@
     <link
         href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&display=swap"
         rel="stylesheet">
+    <link rel="preload" as="image" href="runner.png" fetchpriority="high">
+    <link rel="preload" as="image" href="jump.png" fetchpriority="high">
+    <link rel="preload" as="image" href="crouch.png" fetchpriority="high">
+    <link rel="preload" as="fetch" href="yeahoo.mp3" crossorigin>
+    <link rel="preload" as="fetch" href="crouch.mp3" crossorigin>
+    <link rel="preload" as="fetch" href="gameover.mp3" crossorigin>
+    <link rel="preload" as="media" href="me.mp3">
     <style>
         :root {
             --paper: #faf6ef;
@@ -473,35 +480,53 @@
         (function () {
             "use strict";
 
-            // ---------- Sprite sources ----------
+            // ---------- High-Performance Sprite Loader ----------
             var RUN_SRC = "runner.png";
             var JUMP_SRC = "jump.png";
             var CROUCH_SRC = "crouch.png";
 
-            var imgRun = new Image();
-            var imgJump = new Image();
-            var imgCrouch = new Image();
-
-            imgRun.src = RUN_SRC;
-            imgJump.src = JUMP_SRC;
-            imgCrouch.onerror = function () {
-                if (imgCrouch.src.indexOf("croch.png") === -1) {
-                    imgCrouch.src = "croch.png";
+            function loadGameImage(src, fallbackSrc) {
+                var img = new Image();
+                img.decoding = "async";
+                img.fetchPriority = "high";
+                if (fallbackSrc) {
+                    img.onerror = function () {
+                        if (img.src.indexOf(fallbackSrc) === -1) {
+                            img.src = fallbackSrc;
+                            if (typeof img.decode === "function") {
+                                img.decode().catch(function () {});
+                            }
+                        }
+                    };
                 }
-            };
-            imgCrouch.src = CROUCH_SRC;
+                img.src = src;
+                if (typeof img.decode === "function") {
+                    img.decode().catch(function () {});
+                }
+                return img;
+            }
 
-            // ---------- Local audio & Sound Effects ----------
+            var imgRun = loadGameImage(RUN_SRC);
+            var imgJump = loadGameImage(JUMP_SRC);
+            var imgCrouch = loadGameImage(CROUCH_SRC, "croch.png");
+
+            // ---------- High-Performance Audio Engine ----------
             var bgMusic = new Audio("me.mp3");
             bgMusic.loop = true;
             bgMusic.preload = "auto";
+            try { bgMusic.load(); } catch (e) {}
 
             var sfxJumpAudio = new Audio("yeahoo.mp3");
             sfxJumpAudio.preload = "auto";
+            try { sfxJumpAudio.load(); } catch (e) {}
+
             var sfxCrouchAudio = new Audio("crouch.mp3");
             sfxCrouchAudio.preload = "auto";
+            try { sfxCrouchAudio.load(); } catch (e) {}
+
             var sfxGameOverAudio = new Audio("gameover.mp3");
             sfxGameOverAudio.preload = "auto";
+            try { sfxGameOverAudio.load(); } catch (e) {}
 
             var musicVol = 0.5;
             var sfxVol = 0.75;
@@ -522,6 +547,13 @@
             bgMusic.volume = musicVol;
 
             var audioCtx = null;
+            var sfxBuffers = {};
+            var sfxSources = {
+                jump: "yeahoo.mp3",
+                crouch: "crouch.mp3",
+                gameover: "gameover.mp3"
+            };
+
             function ensureAudio() {
                 try {
                     if (!audioCtx) {
@@ -532,6 +564,59 @@
                         audioCtx.resume();
                     }
                 } catch (e) { }
+            }
+
+            function preloadAudioBuffer(name, url) {
+                if (!window.fetch) return;
+                fetch(url)
+                    .then(function (res) {
+                        if (!res.ok) throw new Error("Fetch failed");
+                        return res.arrayBuffer();
+                    })
+                    .then(function (arrayBuf) {
+                        ensureAudio();
+                        if (audioCtx && audioCtx.decodeAudioData) {
+                            return audioCtx.decodeAudioData(arrayBuf);
+                        }
+                    })
+                    .then(function (decoded) {
+                        if (decoded) sfxBuffers[name] = decoded;
+                    })
+                    .catch(function () {});
+            }
+
+            // Immediately start background fetching & decoding all SFX buffers
+            preloadAudioBuffer("jump", sfxSources.jump);
+            preloadAudioBuffer("crouch", sfxSources.crouch);
+            preloadAudioBuffer("gameover", sfxSources.gameover);
+
+            // Warm-up unlock on first user interaction anywhere
+            function unlockAudioOnGesture() {
+                ensureAudio();
+                window.removeEventListener('pointerdown', unlockAudioOnGesture);
+                window.removeEventListener('keydown', unlockAudioOnGesture);
+                window.removeEventListener('touchstart', unlockAudioOnGesture);
+            }
+            window.addEventListener('pointerdown', unlockAudioOnGesture, { passive: true });
+            window.addEventListener('keydown', unlockAudioOnGesture, { passive: true });
+            window.addEventListener('touchstart', unlockAudioOnGesture, { passive: true });
+
+            function playBufferSound(buffer, baseVolume) {
+                if (!audioCtx || !buffer || sfxVol <= 0.001) return false;
+                try {
+                    if (audioCtx.state === "suspended") audioCtx.resume();
+                    var source = audioCtx.createBufferSource();
+                    var gain = audioCtx.createGain();
+                    var finalVol = Math.max(0, Math.min(1, ((typeof baseVolume === "number") ? baseVolume : 0.8) * sfxVol));
+                    gain.gain.setValueAtTime(finalVol, audioCtx.currentTime);
+                    source.buffer = buffer;
+                    source.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    source.start(0);
+                    return true;
+                } catch (e) {
+                    return false;
+                }
             }
 
             function playAudioClip(audioEl, fallbackType, baseVolume) {
@@ -555,6 +640,10 @@
             }
 
             function playSfx(type) {
+                var baseVol = (type === "crouch") ? 0.75 : 0.85;
+                if (sfxBuffers[type] && playBufferSound(sfxBuffers[type], baseVol)) {
+                    return;
+                }
                 if (type === "jump") {
                     playAudioClip(sfxJumpAudio, "jump", 0.85);
                 } else if (type === "crouch") {
@@ -565,63 +654,63 @@
             }
 
             function playSynthSfx(type) {
-            ensureAudio();
-            if (!audioCtx || sfxVol <= 0.001) return;
-            try {
-                var now = audioCtx.currentTime;
-                var osc = audioCtx.createOscillator();
-                var gain = audioCtx.createGain();
-                osc.connect(gain);
-                gain.connect(audioCtx.destination);
-                var v = sfxVol;
+                ensureAudio();
+                if (!audioCtx || sfxVol <= 0.001) return;
+                try {
+                    var now = audioCtx.currentTime;
+                    var osc = audioCtx.createOscillator();
+                    var gain = audioCtx.createGain();
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    var v = sfxVol;
 
-                if (type === "jump") {
-                    osc.type = "sine";
-                    osc.frequency.setValueAtTime(320, now);
-                    osc.frequency.exponentialRampToValueAtTime(620, now + 0.12);
-                    gain.gain.setValueAtTime(0.0001, now);
-                    gain.gain.exponentialRampToValueAtTime(0.25 * v, now + 0.015);
-                    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
-                    osc.start(now);
-                    osc.stop(now + 0.19);
-                } else if (type === "crouch") {
-                    osc.type = "triangle";
-                    osc.frequency.setValueAtTime(210, now);
-                    osc.frequency.exponentialRampToValueAtTime(120, now + 0.09);
-                    gain.gain.setValueAtTime(0.0001, now);
-                    gain.gain.exponentialRampToValueAtTime(0.2 * v, now + 0.01);
-                    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
-                    osc.start(now);
-                    osc.stop(now + 0.13);
-                } else if (type === "gameover") {
-                    osc.type = "sawtooth";
-                    osc.frequency.setValueAtTime(280, now);
-                    osc.frequency.exponentialRampToValueAtTime(70, now + 0.42);
-                    gain.gain.setValueAtTime(0.0001, now);
-                    gain.gain.exponentialRampToValueAtTime(0.3 * v, now + 0.02);
-                    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
-                    osc.start(now);
-                    osc.stop(now + 0.46);
-                }
-            } catch (e) { }
-        }
+                    if (type === "jump") {
+                        osc.type = "sine";
+                        osc.frequency.setValueAtTime(320, now);
+                        osc.frequency.exponentialRampToValueAtTime(620, now + 0.12);
+                        gain.gain.setValueAtTime(0.0001, now);
+                        gain.gain.exponentialRampToValueAtTime(0.25 * v, now + 0.015);
+                        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+                        osc.start(now);
+                        osc.stop(now + 0.19);
+                    } else if (type === "crouch") {
+                        osc.type = "triangle";
+                        osc.frequency.setValueAtTime(210, now);
+                        osc.frequency.exponentialRampToValueAtTime(120, now + 0.09);
+                        gain.gain.setValueAtTime(0.0001, now);
+                        gain.gain.exponentialRampToValueAtTime(0.2 * v, now + 0.01);
+                        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+                        osc.start(now);
+                        osc.stop(now + 0.13);
+                    } else if (type === "gameover") {
+                        osc.type = "sawtooth";
+                        osc.frequency.setValueAtTime(280, now);
+                        osc.frequency.exponentialRampToValueAtTime(70, now + 0.42);
+                        gain.gain.setValueAtTime(0.0001, now);
+                        gain.gain.exponentialRampToValueAtTime(0.3 * v, now + 0.02);
+                        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
+                        osc.start(now);
+                        osc.stop(now + 0.46);
+                    }
+                } catch (e) { }
+            }
 
-        function startMusic() {
-            ensureAudio();
-            if (musicVol <= 0.001) return;
-            try {
-                var p = bgMusic.play();
-                if (p && p.catch) {
-                    p.catch(function () { });
-                }
-            } catch (e) { }
-        }
-        function stopMusic() {
-            try {
-                bgMusic.pause();
-                bgMusic.currentTime = 0;
-            } catch (e) { }
-        }
+            function startMusic() {
+                ensureAudio();
+                if (musicVol <= 0.001) return;
+                try {
+                    var p = bgMusic.play();
+                    if (p && p.catch) {
+                        p.catch(function () { });
+                    }
+                } catch (e) { }
+            }
+            function stopMusic() {
+                try {
+                    bgMusic.pause();
+                    bgMusic.currentTime = 0;
+                } catch (e) { }
+            }
 
         // ---------- Sound Controller UI Logic ----------
         var musicSlider = document.getElementById('musicSlider');
